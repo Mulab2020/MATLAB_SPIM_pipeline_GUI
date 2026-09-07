@@ -1,3 +1,5 @@
 archive/
 batch/
 .DS_Store
+.claude
+.opencode
