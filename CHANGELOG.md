@@ -4,6 +4,17 @@ All notable changes to the SPIM Pipeline GUI project will be documented in this 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Single-plane (2D) dataset support with automatic detection (`util.auto_params.detect_mode`): data with only `Plane01.stack` and a single-page `ave.tif` runs with `slice = 1` for all detected cells, XY-only motion estimation (Z skipped, Z stats = 0), and duplicate-cell removal skipped automatically
+- Single-plane awareness in the GUI: data mode logged on browse, "Remove double-counted cells" checkbox disabled, plane navigator hidden
+
+### Fixed
+
+- GUI: the batch options dialog no longer overwrites the main window's Step 3 checkbox handles (nested-function variable shadowing), which previously caused "Invalid or deleted object" errors after running batch mode
+
 ## [1.4] — 2026-06-30
 
 ### Added

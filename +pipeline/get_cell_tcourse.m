@@ -11,7 +11,8 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
 % Optional params fields:
 %   .enable_detrending        - Rolling percentile detrending (default: false)
 %   .enable_remove_duplicates - Remove double-counted cells on adjacent
-%                               z-planes by correlation (default: false)
+%                               z-planes by correlation (default: false;
+%                               automatically skipped for single-plane data)
 %   .enable_motion_filter     - Remove cells near high-motion grid points
 %                               (default: false; requires motion_param.mat)
 %   .test_minutes             - Limit to first N minutes (default: all)
@@ -348,6 +349,8 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
         cell_info = cell_info(keep_cells);
         baseline_corrected = baseline_corrected(keep_cells, :);
         n_cells = length(cell_info);
+    elseif params.enable_remove_duplicates
+        fprintf('\n--- Duplicate-cell removal skipped: single-plane data (no adjacent z-planes) ---\n');
     end
 
     %%% ---------------------------------------------------------------
@@ -438,7 +441,8 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     fprintf('  %s\n', fullfile(data_dir, resp_filename));
     fprintf('  %s\n', fullfile(data_dir, info_filename));
     if params.enable_detrending,  fprintf('  [x] Detrending applied\n'); end
-    if params.enable_remove_duplicates, fprintf('  [x] Double-counted cells removed\n'); end
+    if params.enable_remove_duplicates && dim(3) > 1, ...
+            fprintf('  [x] Double-counted cells removed\n'); end
     if params.enable_motion_filter, fprintf('  [x] Motion-filtered\n'); end
     fprintf('Elapsed time: %.1f seconds\n', elapsed);
     fprintf('========================================================\n\n');

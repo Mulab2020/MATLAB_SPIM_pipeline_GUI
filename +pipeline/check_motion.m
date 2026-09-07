@@ -9,6 +9,10 @@ function motion_param = check_motion(data_dir, params)
 % from the first zcycle frames; each subsequent zcycle block is registered
 % against it.
 %
+% Single-plane data (only Plane01.stack + single-page ave.tif) is
+% auto-detected: only Plane01 is processed and Z motion is not estimated
+% (tilt z-component and zmove stats are 0).
+%
 % Optional params fields:
 %   .test_minutes        - Limit processing to first N minutes (for dev/testing)
 %   .brightness_threshold - Grid-point brightness threshold (default: 120)
@@ -46,6 +50,12 @@ function motion_param = check_motion(data_dir, params)
     stack_width = detected.stack_width;
     n_zplanes = detected.n_zplanes;
     sdim = [stack_height, stack_width, n_zplanes];
+
+    % Single-plane data: process Plane01 only; Z motion is not estimated
+    is_single_plane = detected.is_single_plane;
+    if is_single_plane
+        fprintf('Single-plane data: estimating XY motion only (Z motion skipped)\n');
+    end
 
     % Hardcoded physical constants (from acquisition setup)
     xy_pixel_um = 0.406;      % XY pixel size in microns
@@ -122,11 +132,14 @@ function motion_param = check_motion(data_dir, params)
                             int32([plane_dims(1) plane_dims(2)]), int32(1:zcycle));
     end
 
-    % Build 5-plane neighborhood for Z-motion estimation
-    for i = 1:sdim(3)
-        neighbor_planes = (-2:2) + i;
-        valid_neighbors = neighbor_planes(neighbor_planes > 0 & neighbor_planes <= sdim(3));
-        reference_set(i).refstack = ref_volume(:,:,valid_neighbors);
+    % Build 5-plane neighborhood for Z-motion estimation (not needed for
+    % single-plane data — there are no neighboring planes)
+    if ~is_single_plane
+        for i = 1:sdim(3)
+            neighbor_planes = (-2:2) + i;
+            valid_neighbors = neighbor_planes(neighbor_planes > 0 & neighbor_planes <= sdim(3));
+            reference_set(i).refstack = ref_volume(:,:,valid_neighbors);
+        end
     end
 
     %%% ---------------------------------------------------------------
@@ -257,21 +270,26 @@ function motion_param = check_motion(data_dir, params)
                 displacement_xy(i, 1, tp) = dy;
                 displacement_xy(i, 2, tp) = dx;
 
-                move_offset = -dx * d(1) - dy;
+                if is_single_plane
+                    % No neighboring z-planes — Z motion not estimated
+                    displacement_z_raw(i, tp) = 0;
+                else
+                    move_offset = -dx * d(1) - dy;
 
-                % Z: correlate with neighboring planes
-                z_correlations = zeros(1, 5);
-                valid_z_shifts = find(z_neighbor_shifts + zz > 0 & ...
-                                      z_neighbor_shifts + zz <= d(3));
-                for k = 1:length(valid_z_shifts)
-                    z_target_vals = reference_set(zz).refstack(...
-                        gind + move_offset + patch_offset_inds + ...
-                        (k-1)*d(1)*d(2));
-                    z_correlations(valid_z_shifts(k)) = ...
-                        util.corrcoef_pair_mex(target_patch(:), z_target_vals(:));
+                    % Z: correlate with neighboring planes
+                    z_correlations = zeros(1, 5);
+                    valid_z_shifts = find(z_neighbor_shifts + zz > 0 & ...
+                                          z_neighbor_shifts + zz <= d(3));
+                    for k = 1:length(valid_z_shifts)
+                        z_target_vals = reference_set(zz).refstack(...
+                            gind + move_offset + patch_offset_inds + ...
+                            (k-1)*d(1)*d(2));
+                        z_correlations(valid_z_shifts(k)) = ...
+                            util.corrcoef_pair_mex(target_patch(:), z_target_vals(:));
+                    end
+                    [~, z_best] = max(z_correlations(valid_z_shifts));
+                    displacement_z_raw(i, tp) = z_neighbor_shifts(valid_z_shifts(z_best));
                 end
-                [~, z_best] = max(z_correlations(valid_z_shifts));
-                displacement_z_raw(i, tp) = z_neighbor_shifts(valid_z_shifts(z_best));
             end
 
             % Linear fit of displacement over time → cumulative tilt
@@ -308,6 +326,12 @@ function motion_param = check_motion(data_dir, params)
             end
         end
 
+        if is_single_plane
+            % Z was not estimated — report exactly 0 (median of an empty
+            % neighborhood would yield NaN on sparse grids)
+            tilt_med(:, 3) = 0;
+        end
+
         % --- 3f. Compute per-plane summary statistics ---
         xy_magnitude = sqrt(tilt_med(:,1).^2 + tilt_med(:,2).^2);
 
@@ -316,8 +340,15 @@ function motion_param = check_motion(data_dir, params)
         motion_param(zz).indslist = valid_grid_inds;
         motion_param(zz).xymove_av = mean(xy_magnitude) * xy_pixel_um;
         motion_param(zz).xymove_sd = std(xy_magnitude * xy_pixel_um, [], 1);
-        motion_param(zz).zmove_av = mean(abs(tilt_med(:,3))) * z_pixel_um;
-        motion_param(zz).zmove_sd = std(abs(tilt_med(:,3)) * z_pixel_um);
+        if is_single_plane
+            % Z was not estimated — report exactly 0 (mean of an empty
+            % tilt_med would yield NaN when no grid points are valid)
+            motion_param(zz).zmove_av = 0;
+            motion_param(zz).zmove_sd = 0;
+        else
+            motion_param(zz).zmove_av = mean(abs(tilt_med(:,3))) * z_pixel_um;
+            motion_param(zz).zmove_sd = std(abs(tilt_med(:,3)) * z_pixel_um);
+        end
 
         % Store visualization data
         output(zz).masks = reg_img;
@@ -336,9 +367,14 @@ function motion_param = check_motion(data_dir, params)
         move_tcourse(zz).rs_ave_z = mean(z_over_time);
         move_tcourse(zz).rs_std_z = std(z_over_time);
 
-        fprintf('  Plane %d done: XY motion = %.2f +/- %.2f um, Z motion = %.2f +/- %.2f um\n', ...
-                zz, motion_param(zz).xymove_av, motion_param(zz).xymove_sd, ...
-                motion_param(zz).zmove_av, motion_param(zz).zmove_sd);
+        if is_single_plane
+            fprintf('  Plane %d done: XY motion = %.2f +/- %.2f um (Z not estimated)\n', ...
+                    zz, motion_param(zz).xymove_av, motion_param(zz).xymove_sd);
+        else
+            fprintf('  Plane %d done: XY motion = %.2f +/- %.2f um, Z motion = %.2f +/- %.2f um\n', ...
+                    zz, motion_param(zz).xymove_av, motion_param(zz).xymove_sd, ...
+                    motion_param(zz).zmove_av, motion_param(zz).zmove_sd);
+        end
         send(q, zz);
     end
     close(wb);
@@ -367,12 +403,17 @@ function motion_param = check_motion(data_dir, params)
         clf(h1);
         errorbar(xtcourse, move_tcourse(zz).rs_ave_xy * xy_pixel_um, ...
                  move_tcourse(zz).rs_std_xy * xy_pixel_um, 'mo-', 'linewidth', 2);
-        hold on;
-        errorbar(xtcourse, move_tcourse(zz).rs_ave_z * z_pixel_um, ...
-                 move_tcourse(zz).rs_std_z * z_pixel_um, 'co-', 'linewidth', 2);
-        hold off;
+        if is_single_plane
+            title({['Plane ', num2str(zz), ': motion timecourse'], ...
+                   'magenta=XY (Z not estimated)'});
+        else
+            hold on;
+            errorbar(xtcourse, move_tcourse(zz).rs_ave_z * z_pixel_um, ...
+                     move_tcourse(zz).rs_std_z * z_pixel_um, 'co-', 'linewidth', 2);
+            hold off;
+            title({['Plane ', num2str(zz), ': motion timecourse'], 'magenta=XY,  cyan=Z'});
+        end
         ylim([-10 10]); xlim([0 max(xtcourse)]);
-        title({['Plane ', num2str(zz), ': motion timecourse'], 'magenta=XY,  cyan=Z'});
         CC = getframe(h1);
         imwrite(CC.cdata, fullfile(data_dir, 'motion_tcourse.tif'), 'WriteMode', 'append');
     end
@@ -387,29 +428,40 @@ function motion_param = check_motion(data_dir, params)
 
     for zz = 1:length(z_list)
         clf(h2);
-        % Quiver plot
-        subplot(1, 2, 1);
-        ha = gca; set(ha, 'Position', [0 0 0.5 1]);
-        image(output(zz).regimg2); hold on;
-        quiver(ceil(output(zz).indslist2 / dim(1)), ...
-               mod(output(zz).indslist2, dim(1)), ...
-               output(zz).tilt_med(:,2) * 10, ...
-               output(zz).tilt_med(:,1) * 10, 0, 'linewidth', 2, 'Color', [1 0 0]);
-        hold off; axis off;
+        if is_single_plane
+            % XY quiver only (Z motion not estimated)
+            ha = gca; set(ha, 'Position', [0 0 1 1]);
+            image(output(zz).regimg2); hold on;
+            quiver(ceil(output(zz).indslist2 / dim(1)), ...
+                   mod(output(zz).indslist2, dim(1)), ...
+                   output(zz).tilt_med(:,2) * 10, ...
+                   output(zz).tilt_med(:,1) * 10, 0, 'linewidth', 2, 'Color', [1 0 0]);
+            hold off; axis off;
+        else
+            % Quiver plot
+            subplot(1, 2, 1);
+            ha = gca; set(ha, 'Position', [0 0 0.5 1]);
+            image(output(zz).regimg2); hold on;
+            quiver(ceil(output(zz).indslist2 / dim(1)), ...
+                   mod(output(zz).indslist2, dim(1)), ...
+                   output(zz).tilt_med(:,2) * 10, ...
+                   output(zz).tilt_med(:,1) * 10, 0, 'linewidth', 2, 'Color', [1 0 0]);
+            hold off; axis off;
 
-        % Z-motion rectangles
-        subplot(1, 2, 2);
-        ha2 = gca; set(ha2, 'Position', [0.5 0 0.5 1]);
-        image(output(zz).regimg2); hold on;
-        for i = 1:5
-            in_this_bin = find(round(output(zz).tilt_med(:,3)) == z_move_labels(i));
-            for j = 1:length(in_this_bin)
-                rectangle('Position', [ceil(output(zz).indslist2(in_this_bin(j)) / dim(1)), ...
-                          mod(output(zz).indslist2(in_this_bin(j)), dim(1)), 20, 20], ...
-                          'FaceColor', colorlist(i, :));
+            % Z-motion rectangles
+            subplot(1, 2, 2);
+            ha2 = gca; set(ha2, 'Position', [0.5 0 0.5 1]);
+            image(output(zz).regimg2); hold on;
+            for i = 1:5
+                in_this_bin = find(round(output(zz).tilt_med(:,3)) == z_move_labels(i));
+                for j = 1:length(in_this_bin)
+                    rectangle('Position', [ceil(output(zz).indslist2(in_this_bin(j)) / dim(1)), ...
+                              mod(output(zz).indslist2(in_this_bin(j)), dim(1)), 20, 20], ...
+                              'FaceColor', colorlist(i, :));
+                end
             end
+            hold off; axis off;
         end
-        hold off; axis off;
 
         CC = getframe(h2);
         imwrite(CC.cdata, fullfile(data_dir, 'motion.tif'), 'WriteMode', 'append');
@@ -434,17 +486,24 @@ function motion_param = check_motion(data_dir, params)
     title('XY motion per plane');
 
     subplot(1, 2, 2);
-    for zz = z_list
-        plot(ones(1, length(output(zz).indslist2)) * zz, ...
-             abs(output(zz).tilt_med(:,3)) * z_pixel_um, '.');
-        hold on;
+    if is_single_plane
+        text(0.5, 0.5, {'Z motion not estimated', '(single-plane data)'}, ...
+             'HorizontalAlignment', 'center', 'Units', 'normalized');
+        axis off;
+        title('Z motion per plane');
+    else
+        for zz = z_list
+            plot(ones(1, length(output(zz).indslist2)) * zz, ...
+                 abs(output(zz).tilt_med(:,3)) * z_pixel_um, '.');
+            hold on;
+        end
+        errorbar([motion_param(z_list).zmove_av], [motion_param(z_list).zmove_sd], ...
+                 'r', 'LineWidth', 2, 'LineStyle', 'none');
+        scatter(z_list, [motion_param.zmove_av], 'ro', 'fill'); hold off;
+        xlim([min(z_list)-1 max(z_list)+1]); ylim([-1 10]);
+        xlabel('Z-plane'); ylabel('Z motion (um)');
+        title('Z motion per plane');
     end
-    errorbar([motion_param(z_list).zmove_av], [motion_param(z_list).zmove_sd], ...
-             'r', 'LineWidth', 2, 'LineStyle', 'none');
-    scatter(z_list, [motion_param.zmove_av], 'ro', 'fill'); hold off;
-    xlim([min(z_list)-1 max(z_list)+1]); ylim([-1 10]);
-    xlabel('Z-plane'); ylabel('Z motion (um)');
-    title('Z motion per plane');
 
     set(h3, 'PaperPositionMode', 'auto');
     saveas(h3, fullfile(data_dir, 'motion_graph.tif'), 'tif');

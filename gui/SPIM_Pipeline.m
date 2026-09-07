@@ -226,6 +226,7 @@ function SPIM_Pipeline()
     state.seg_done = false;
     state.motion_done = false;
     state.seg_threshold = [];
+    state.is_single_plane = false;
 
     %%% ---------------------------------------------------------------
     %%% Callbacks
@@ -254,6 +255,20 @@ function SPIM_Pipeline()
             log_msg(sprintf('Detected: %.2f Hz, %dx%dx%d, %d frames', ...
                     det.frame_rate, det.stack_height, det.stack_width, ...
                     det.n_zplanes, det.n_total_frames));
+
+            % Data mode: single-plane vs volumetric
+            state.is_single_plane = det.is_single_plane;
+            if det.is_single_plane
+                log_msg('Data mode: single-plane — Z motion and duplicate removal not applicable');
+                dedup_cb.Enable = 'off';
+                dedup_cb.Value = false;
+                dedup_cb.Tooltip = 'Not applicable for single-plane data (only one z-plane)';
+            else
+                log_msg(sprintf('Data mode: volumetric (%d planes)', det.n_zplanes));
+                dedup_cb.Enable = 'on';
+                dedup_cb.Tooltip = ['Correlate overlapping cells on adjacent z-planes ' ...
+                                    'and remove the redundant one (correlation threshold: 0.7)'];
+            end
 
             % Set threshold default and suggestion
             ave_file = fullfile(d, 'ave.tif');
@@ -363,7 +378,7 @@ function SPIM_Pipeline()
                         state.current_plane = 1;
                         plane_spinner.Limits = [1 length(cmask_info)];
                         plane_spinner.Value = 1;
-                        plane_nav.Visible = 'on';
+                        set_plane_nav_visible(length(cmask_info));
                         update_preview();
                         log_msg(sprintf('Loaded cell mask preview: %s (%d z-planes)', ...
                                 cmask_files(1).name, length(cmask_info)));
@@ -428,7 +443,7 @@ function SPIM_Pipeline()
                 state.current_plane = 1;
                 plane_spinner.Limits = [1 length(cmask_info)];
                 plane_spinner.Value = 1;
-                plane_nav.Visible = 'on';
+                set_plane_nav_visible(length(cmask_info));
                 update_preview();
             end
 
@@ -491,6 +506,15 @@ function SPIM_Pipeline()
         new_val = max(plane_spinner.Limits(1), min(plane_spinner.Limits(2), new_val));
         plane_spinner.Value = new_val;
         update_preview();
+    end
+
+    function set_plane_nav_visible(n_planes)
+        % Hide the plane navigator for single-plane data — nothing to navigate
+        if n_planes > 1
+            plane_nav.Visible = 'on';
+        else
+            plane_nav.Visible = 'off';
+        end
     end
 
     function check_tcourse_ready()
@@ -875,7 +899,7 @@ function SPIM_Pipeline()
             state.current_plane = 1;
             plane_spinner.Limits = [1 length(cmask_info)];
             plane_spinner.Value = 1;
-            plane_nav.Visible = 'on';
+            set_plane_nav_visible(length(cmask_info));
             update_preview();
             n_cells = length(state.cell_info);
             cell_count_label.Text = sprintf('%d cells found (batch)', n_cells);
@@ -1055,19 +1079,22 @@ function SPIM_Pipeline()
                 'Position', [15 y0 dlg_w-30 20]);
         y0 = y0 - row_h;
 
-        detrend_cb = uicheckbox(dlg, 'Text', 'Detrending (sliding-window 15th percentile)', ...
-                                'Value', true, ...
-                                'Position', [20 y0 dlg_w-40 22]);
+        % NOTE: dialog-local controls use dlg_ prefix so they do not
+        % clobber the main window's checkbox handles (nested functions
+        % share the workspace)
+        dlg_detrend_cb = uicheckbox(dlg, 'Text', 'Detrending (sliding-window 15th percentile)', ...
+                                    'Value', true, ...
+                                    'Position', [20 y0 dlg_w-40 22]);
         y0 = y0 - row_h;
 
-        dedup_cb = uicheckbox(dlg, 'Text', 'Remove double-counted cells (corr > 0.7)', ...
-                             'Value', false, ...
-                             'Position', [20 y0 dlg_w-40 22]);
+        dlg_dedup_cb = uicheckbox(dlg, 'Text', 'Remove double-counted cells (corr > 0.7)', ...
+                                  'Value', false, ...
+                                  'Position', [20 y0 dlg_w-40 22]);
         y0 = y0 - row_h;
 
-        motionfilt_cb = uicheckbox(dlg, 'Text', 'Motion-based filtering (>1 pixel)', ...
-                                   'Value', false, ...
-                                   'Position', [20 y0 dlg_w-40 22]);
+        dlg_motionfilt_cb = uicheckbox(dlg, 'Text', 'Motion-based filtering (>1 pixel)', ...
+                                       'Value', false, ...
+                                       'Position', [20 y0 dlg_w-40 22]);
         y0 = y0 - row_h - 10;
 
         % OK / Cancel buttons
@@ -1090,9 +1117,9 @@ function SPIM_Pipeline()
         opts = struct();
         opts.run_motion = run_motion_cb.Value;
         opts.use_gpu = gpu_cb.Value;
-        opts.detrending = detrend_cb.Value;
-        opts.dedup = dedup_cb.Value;
-        opts.motionfilt = motionfilt_cb.Value;
+        opts.detrending = dlg_detrend_cb.Value;
+        opts.dedup = dlg_dedup_cb.Value;
+        opts.motionfilt = dlg_motionfilt_cb.Value;
 
         close(dlg);
     end

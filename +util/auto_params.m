@@ -5,6 +5,7 @@ classdef auto_params
 %
 % Static methods for reading SPIM acquisition metadata:
 %   detect_all        - Master: returns struct with all parameters
+%   detect_mode       - Detect single-plane vs volumetric data from files
 %   read_frame_rate   - Parse Stack_frequency.txt
 %   read_dimensions   - Parse Stack dimensions.log or ch0_cam1.xml
 %   read_frame_range  - Parse minANDmax.txt
@@ -18,7 +19,10 @@ classdef auto_params
         %
         % Returns a struct with fields:
         %   .frame_rate, .n_total_frames, .stack_height, .stack_width,
-        %   .n_zplanes, .frame_start, .frame_end
+        %   .n_zplanes, .frame_start, .frame_end, .is_single_plane
+        %
+        % When single-plane data is detected, .n_zplanes is forced to 1
+        % regardless of what the metadata files say.
             fprintf('\n========== Auto-detecting parameters from: %s ==========\n', data_dir);
 
             summary = struct();
@@ -32,12 +36,24 @@ classdef auto_params
             [summary.frame_start, summary.frame_end] = ...
                 util.auto_params.read_frame_range(data_dir);
 
+            summary.is_single_plane = util.auto_params.detect_mode(data_dir);
+            if summary.is_single_plane && summary.n_zplanes ~= 1
+                fprintf('  [auto_params] Overriding metadata n_zplanes=%d with 1 (single-plane data)\n', ...
+                        summary.n_zplanes);
+                summary.n_zplanes = 1;
+            end
+
             fprintf('\n========== Parameter summary ==========\n');
             fprintf('  Frame rate:       %.2f Hz\n', summary.frame_rate);
             fprintf('  Stack dimensions: %d x %d x %d (H x W x Z)\n', ...
                     summary.stack_height, summary.stack_width, summary.n_zplanes);
             fprintf('  Total frames:     %d (range %d-%d)\n', ...
                     summary.n_total_frames, summary.frame_start, summary.frame_end);
+            if summary.is_single_plane
+                fprintf('  Data mode:        single-plane\n');
+            else
+                fprintf('  Data mode:        volumetric\n');
+            end
             fprintf('========================================\n\n');
         end
 
@@ -133,6 +149,55 @@ classdef auto_params
             [~, n_total_frames] = util.auto_params.read_frame_rate(data_dir);
             frame_start = 1;
             frame_end = n_total_frames;
+        end
+
+
+        function [is_single_plane, n_plane_files, n_ave_pages] = detect_mode(data_dir)
+        % DETECT_MODE  Detect single-plane vs volumetric data from files.
+        %
+        %   [is_single_plane, n_plane_files, n_ave_pages] = ...
+        %       util.auto_params.detect_mode(data_dir)
+        %
+        % Single-plane data is identified by two conditions:
+        %   1. Only Plane01.stack is present (no Plane02.stack, Plane03.stack, ...)
+        %   2. ave.tif contains exactly one image plane
+        %
+        % If the two conditions conflict (e.g. one plane file but a
+        % multi-page ave.tif), a warning is issued and the data is treated
+        % as volumetric.
+            % Count PlaneXX.stack files (exact pattern: Plane + digits + .stack)
+            all_plane_files = dir(fullfile(data_dir, 'Plane*.stack'));
+            n_plane_files = 0;
+            for f = 1:length(all_plane_files)
+                if ~isempty(regexp(all_plane_files(f).name, '^Plane\d+\.stack$', 'once'))
+                    n_plane_files = n_plane_files + 1;
+                end
+            end
+
+            % Count ave.tif pages (0 if ave.tif is absent; downstream stages
+            % will raise their own missing-file errors)
+            ave_file = fullfile(data_dir, 'ave.tif');
+            if exist(ave_file, 'file')
+                n_ave_pages = length(imfinfo(ave_file));
+            else
+                n_ave_pages = 0;
+            end
+
+            is_single_plane = (n_plane_files == 1) && (n_ave_pages == 1);
+
+            if is_single_plane
+                fprintf(['  [auto_params] Single-plane data detected ' ...
+                         '(Plane01.stack only, ave.tif has 1 plane)\n']);
+            else
+                fprintf('  [auto_params] Volumetric data: %d plane stack files, ave.tif has %d planes\n', ...
+                        n_plane_files, n_ave_pages);
+                if n_plane_files == 1 && n_ave_pages > 1
+                    warning('auto_params:ambiguousMode', ...
+                        ['Only Plane01.stack found but ave.tif has %d planes — ' ...
+                         'treating data as volumetric. Check the data directory.'], ...
+                        n_ave_pages);
+                end
+            end
         end
 
     end

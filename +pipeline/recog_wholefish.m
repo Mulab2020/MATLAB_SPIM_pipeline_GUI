@@ -10,6 +10,9 @@ function cell_info = recog_wholefish(data_dir, br_threshold, show_histogram)
 % threshold. If omitted, a suggestion is computed from the data histogram
 % and the user is prompted once.
 %
+% Single-plane data (single-page ave.tif) is supported: segmentation runs
+% on the single plane and all detected cells are assigned slice = 1.
+%
 % Inputs:
 %   data_dir       - Path to registered data directory containing ave.tif
 %   br_threshold   - Brightness threshold (optional; auto-detected if empty)
@@ -55,6 +58,10 @@ function cell_info = recog_wholefish(data_dir, br_threshold, show_histogram)
     end
 
     fprintf('Stack dimensions: %d x %d x %d (H x W x Z planes)\n', dim(1), dim(2), dim(3));
+
+    if dim(3) == 1
+        fprintf('Single-plane data detected (ave.tif has 1 plane) — segmenting plane 1 only\n');
+    end
 
     %%% ---------------------------------------------------------------
     %%% 2. Determine brightness threshold

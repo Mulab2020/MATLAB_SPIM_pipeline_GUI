@@ -8,7 +8,25 @@ A MATLAB application for processing light-sheet microscopy (SPIM) calcium imagin
 
 2. **Motion Correction** (`check_motion` / `check_motion_gpu`) — Estimates and corrects tissue motion over time using FFT-based 2D cross-correlation on a grid of points across each z-plane. A reference is built from the first time block; each subsequent block is registered against it. A GPU-accelerated variant exists but has a known defect (see [Known Issues](#known-issues)).
 
-3. **Time Course Extraction** (`get_cell_tcourse`) — Reads per-plane time-series stacks (`PlaneXX.stackf`), extracts mean fluorescence within each cell's ROI over time, applies exponential photobleaching baseline correction, and optionally performs rolling-percentile detrending, duplicate removal, and motion-based cell filtering.
+3. **Time Course Extraction** (`get_cell_tcourse`) — Reads per-plane time-series stacks (`PlaneXX.stack`), extracts mean fluorescence within each cell's ROI over time, applies exponential photobleaching baseline correction, and optionally performs rolling-percentile detrending, duplicate removal, and motion-based cell filtering.
+
+## Single-Plane Mode
+
+Single-plane (2D) datasets are detected automatically. Detection criteria (both must hold):
+
+- Only `Plane01.stack` is present (no `Plane02.stack`, `Plane03.stack`, …)
+- `ave.tif` contains exactly one image plane
+
+When single-plane data is detected:
+
+| Aspect | Behavior |
+|--------|----------|
+| Cell segmentation | Runs on the single plane; all cells get `slice = 1` |
+| Motion correction | XY only — Z estimation and its plots are skipped (Z stats = 0) |
+| Duplicate-cell removal | Skipped automatically (no adjacent z-planes); the GUI disables the option |
+| Metadata plane count | Overridden to 1, even if `Stack dimensions.log` claims otherwise |
+
+If the two detection criteria conflict (e.g. only `Plane01.stack` but a multi-page `ave.tif`), a warning is issued and the data is treated as volumetric.
 
 ## Requirements
 
@@ -80,7 +98,7 @@ Each data directory must contain:
 | `Stack_frequency.txt` | Frame-rate metadata (3 lines: Hz, duration, volume count) |
 | `Stack dimensions.log` or `ch0_cam1.xml` | Image dimensions (width × height) |
 | `minANDmax.txt` | Frame range metadata |
-| `Plane01.stackf`, `Plane02.stackf`, … | Per-plane time-series stacks in custom binary format |
+| `Plane01.stack`, `Plane02.stack`, … | Per-plane time-series stacks in custom binary format (single-plane data has only `Plane01.stack`) |
 
 The `.stackf` files are read via compiled MEX binaries (Windows 64-bit). MEX source code (`.cpp`) is included in `+fileIO/` and `+util/` for recompilation on other platforms.
 

@@ -9,6 +9,10 @@ function motion_param = check_motion_gpu(data_dir, params)
 % throughput. All other logic (I/O, grid placement, visualization)
 % is identical to the CPU version.
 %
+% Single-plane data (only Plane01.stack + single-page ave.tif) is
+% auto-detected: only Plane01 is processed and Z motion is not estimated
+% (tilt z-component and zmove stats are 0).
+%
 % Falls back to pipeline.check_motion if:
 %   - No GPU device is detected (gpuDeviceCount == 0)
 %   - GPU memory is insufficient for the working set
@@ -63,6 +67,12 @@ function motion_param = check_motion_gpu(data_dir, params)
     stack_width = detected.stack_width;
     n_zplanes = detected.n_zplanes;
     sdim = [stack_height, stack_width, n_zplanes];
+
+    % Single-plane data: process Plane01 only; Z motion is not estimated
+    is_single_plane = detected.is_single_plane;
+    if is_single_plane
+        fprintf('Single-plane data: estimating XY motion only (Z motion skipped)\n');
+    end
 
     xy_pixel_um = 0.406;
     z_pixel_um = 5;
@@ -123,10 +133,14 @@ function motion_param = check_motion_gpu(data_dir, params)
                             int32([plane_dims(1) plane_dims(2)]), int32(1:zcycle));
     end
 
-    for i = 1:sdim(3)
-        neighbor_planes = (-2:2) + i;
-        valid_neighbors = neighbor_planes(neighbor_planes > 0 & neighbor_planes <= sdim(3));
-        reference_set(i).refstack = ref_volume(:,:,valid_neighbors);
+    % Build 5-plane neighborhood for Z-motion estimation (not needed for
+    % single-plane data — there are no neighboring planes)
+    if ~is_single_plane
+        for i = 1:sdim(3)
+            neighbor_planes = (-2:2) + i;
+            valid_neighbors = neighbor_planes(neighbor_planes > 0 & neighbor_planes <= sdim(3));
+            reference_set(i).refstack = ref_volume(:,:,valid_neighbors);
+        end
     end
 
     %%% --- Motion estimation with GPU-accelerated FFT ---
@@ -217,20 +231,25 @@ function motion_param = check_motion_gpu(data_dir, params)
                 displacement_xy_g(1, tp) = dy;
                 displacement_xy_g(2, tp) = dx;
 
-                % Z estimation (CPU — small data, correlation is cheap)
-                move_offset = -dx * d(1) - dy;
-                z_correlations = zeros(1, 5);
-                valid_z_shifts = find(z_neighbor_shifts + zz > 0 & ...
-                                      z_neighbor_shifts + zz <= d(3));
-                target_cpu = target_patch;  % target_patch is already on CPU
-                for k = 1:length(valid_z_shifts)
-                    z_target_vals = reference_set(zz).refstack(...
-                        gind + move_offset + patch_offset_inds + (k-1)*d(1)*d(2));
-                    z_correlations(valid_z_shifts(k)) = ...
-                        util.corrcoef_pair_mex(target_cpu(:), z_target_vals(:));
+                if is_single_plane
+                    % No neighboring z-planes — Z motion not estimated
+                    displacement_z_raw_g(tp) = 0;
+                else
+                    % Z estimation (CPU — small data, correlation is cheap)
+                    move_offset = -dx * d(1) - dy;
+                    z_correlations = zeros(1, 5);
+                    valid_z_shifts = find(z_neighbor_shifts + zz > 0 & ...
+                                          z_neighbor_shifts + zz <= d(3));
+                    target_cpu = target_patch;  % target_patch is already on CPU
+                    for k = 1:length(valid_z_shifts)
+                        z_target_vals = reference_set(zz).refstack(...
+                            gind + move_offset + patch_offset_inds + (k-1)*d(1)*d(2));
+                        z_correlations(valid_z_shifts(k)) = ...
+                            util.corrcoef_pair_mex(target_cpu(:), z_target_vals(:));
+                    end
+                    [~, z_best] = max(z_correlations(valid_z_shifts));
+                    displacement_z_raw_g(tp) = z_neighbor_shifts(valid_z_shifts(z_best));
                 end
-                [~, z_best] = max(z_correlations(valid_z_shifts));
-                displacement_z_raw_g(tp) = z_neighbor_shifts(valid_z_shifts(z_best));
             end
 
             displacement_xy = gather(displacement_xy_g);
@@ -267,18 +286,36 @@ function motion_param = check_motion_gpu(data_dir, params)
             end
         end
 
+        if is_single_plane
+            % Z was not estimated — report exactly 0 (median of an empty
+            % neighborhood would yield NaN on sparse grids)
+            tilt_med(:, 3) = 0;
+        end
+
         xy_mag = sqrt(tilt_med(:,1).^2 + tilt_med(:,2).^2);
         motion_param(zz).tilt = tilt_raw;
         motion_param(zz).tilt_med = tilt_med;
         motion_param(zz).indslist = valid_grid_inds;
         motion_param(zz).xymove_av = mean(xy_mag) * xy_pixel_um;
         motion_param(zz).xymove_sd = std(xy_mag * xy_pixel_um, [], 1);
-        motion_param(zz).zmove_av = mean(abs(tilt_med(:,3))) * z_pixel_um;
-        motion_param(zz).zmove_sd = std(abs(tilt_med(:,3)) * z_pixel_um);
+        if is_single_plane
+            % Z was not estimated — report exactly 0 (mean of an empty
+            % tilt_med would yield NaN when no grid points are valid)
+            motion_param(zz).zmove_av = 0;
+            motion_param(zz).zmove_sd = 0;
+        else
+            motion_param(zz).zmove_av = mean(abs(tilt_med(:,3))) * z_pixel_um;
+            motion_param(zz).zmove_sd = std(abs(tilt_med(:,3)) * z_pixel_um);
+        end
 
-        fprintf('  Plane %d (GPU): XY = %.2f +/- %.2f um, Z = %.2f +/- %.2f um\n', ...
-                zz, motion_param(zz).xymove_av, motion_param(zz).xymove_sd, ...
-                motion_param(zz).zmove_av, motion_param(zz).zmove_sd);
+        if is_single_plane
+            fprintf('  Plane %d (GPU): XY = %.2f +/- %.2f um (Z not estimated)\n', ...
+                    zz, motion_param(zz).xymove_av, motion_param(zz).xymove_sd);
+        else
+            fprintf('  Plane %d (GPU): XY = %.2f +/- %.2f um, Z = %.2f +/- %.2f um\n', ...
+                    zz, motion_param(zz).xymove_av, motion_param(zz).xymove_sd, ...
+                    motion_param(zz).zmove_av, motion_param(zz).zmove_sd);
+        end
     end
 
     % Keep pool alive if requested (for benchmarking)
