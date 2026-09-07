@@ -64,10 +64,10 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
         ending_frame = 0;  % 0 = use all frames
     end
 
-    % Baseline window: 5 seconds worth of frames
+    % Baseline window: 3 minutes worth of frames
     adapting_frame = 1;
-    baseline_window_frames = ceil(frame_rate * 5);
-    fprintf('Baseline window: ceil(%.2f Hz * 5 s) = %d frames\n', frame_rate, baseline_window_frames);
+    baseline_window_frames = ceil(frame_rate * 180);
+    fprintf('Baseline window: ceil(%.2f Hz * 180 s) = %d frames\n', frame_rate, baseline_window_frames);
 
     %%% ---------------------------------------------------------------
     %%% 2. Load prerequisite data
@@ -104,14 +104,11 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
         bg_file = fullfile(data_dir, 'background_1.tif');
     end
     if exist(bg_file, 'file')
-        background_img = imread(bg_file);
         fprintf('Loaded background image: %s\n', bg_file);
     else
-        warning('get_cell_tcourse:noBackground', ...
-                'Background image not found. Using 0 as background value.');
-        background_img = zeros(dim(1), dim(2), 'uint16');
+        warning('Background image not found.');
     end
-
+    background_img = imread(bg_file);
     %%% ---------------------------------------------------------------
     %%% 3. Build z-plane → cell index mapping
     %%% ---------------------------------------------------------------
@@ -201,7 +198,7 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     n_baseline_windows = floor(n_timepoints / baseline_window_frames);
     fprintf('  %d baseline windows of %d frames each\n', n_baseline_windows, baseline_window_frames);
 
-    bottom_fraction = round(baseline_window_frames / 3);
+    bottom_fraction = round(baseline_window_frames / 5);
     fprintf('  F0 estimated from bottom %d frames per window\n', bottom_fraction);
 
     % For each cell, estimate baseline in each window (bottom fraction)
