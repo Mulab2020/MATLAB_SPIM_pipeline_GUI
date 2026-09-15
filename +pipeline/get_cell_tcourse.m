@@ -5,29 +5,56 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
 %   [cell_resp, cell_info] = pipeline.get_cell_tcourse(data_dir, params)
 %
 % Reads per-plane stacks (PlaneXX.stack), extracts the mean fluorescence
-% within each cell's ROI over time, applies baseline correction for
-% photobleaching, and optionally runs detrending and cell filtering.
+% within each cell's ROI over time, and normalizes each trace with a
+% rolling-percentile baseline (cf. "Baseline normalization" in Mu et al.,
+% 2019, Cell 178, 27-43):
+%
+%   bg   = mean of bottom 5% of Background_1.tif pixels
+%   F0   = rolling percentile of (F - bg)   (per-sample sliding window)
+%   dF/F = (F - bg - F0) / (max(F0, 0) + offset)
+%
+% The legacy exponential photobleaching fit is available as an option and
+% runs before the rolling-percentile step when enabled. Optional
+% post-processing: duplicate-cell removal and motion-based filtering.
 %
 % Optional params fields:
-%   .enable_detrending        - Rolling percentile detrending (default: false)
+%   .enable_detrending        - Rolling percentile dF/F normalization
+%                               (default: true)
+%   .detrend_window_frames    - Rolling window length in frames (default: 600)
+%   .detrend_percentile       - Baseline percentile, 0-100 (default: 15)
+%   .detrend_offset           - Offset added to F0 in the dF/F denominator
+%                               to avoid division by near-zero baselines
+%                               (default: 10)
+%   .enable_photobleach_fit   - Legacy exponential photobleaching baseline
+%                               correction, applied before detrending
+%                               (default: false)
+%   .baseline_window_seconds  - Baseline window for the exponential fit, in
+%                               seconds; also the epoch length used for
+%                               duplicate-cell correlation (default: 180)
 %   .enable_remove_duplicates - Remove double-counted cells on adjacent
 %                               z-planes by correlation (default: false;
 %                               automatically skipped for single-plane data)
+%   .dedup_corr_threshold     - Correlation threshold for duplicate removal
+%                               (default: 0.7)
 %   .enable_motion_filter     - Remove cells near high-motion grid points
 %                               (default: false; requires motion_param.mat)
+%   .motion_threshold_pixels  - Motion threshold in pixels (default: 1)
 %   .test_minutes             - Limit to first N minutes (default: all)
 %   .pool_size                - Number of parallel workers (default: 6)
 %
-% Always-active processing:
-%   1. Raw fluorescence extraction (mean over cell ROI)
-%   2. Exponential photobleaching baseline correction
-%
-% Outputs (written to data_dir):
-%   cell_resp_processed.stackf  - Baseline-corrected fluorescence (float32)
+% Outputs (written to data_dir, with a suffix reflecting non-default
+% options, e.g. cell_resp_processed_expfit_dedup.stackf):
+%   cell_resp_processed.stackf  - Normalized fluorescence (float32)
+%   cell_resp_baseline.mat      - Inferred rolling-percentile baseline F0
+%                                 (matrix f0_all, float32) plus provenance
+%                                 struct rolling_baseline (window,
+%                                 percentile, offset, background level);
+%                                 written when detrending is on
 %   cell_info_processed.mat     - Filtered cell info struct
 %   cell_resp_dim_processed.mat - Dimensions of processed response
 %
-% See also pipeline.recog_wholefish, pipeline.check_motion
+% See also pipeline.recog_wholefish, pipeline.check_motion, ...
+%          util.rolling_percentile_filter
 
     import util.*;
     import fileIO.*;
@@ -43,10 +70,29 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     if nargin < 2, params = struct(); end
 
     % Default parameter values
-    if ~isfield(params, 'enable_detrending'),        params.enable_detrending = false; end
+    if ~isfield(params, 'enable_detrending'),        params.enable_detrending = true; end
+    if ~isfield(params, 'detrend_window_frames'),    params.detrend_window_frames = 600; end
+    if ~isfield(params, 'detrend_percentile'),       params.detrend_percentile = 15; end
+    if ~isfield(params, 'detrend_offset'),           params.detrend_offset = 10; end
+    if ~isfield(params, 'enable_photobleach_fit'),   params.enable_photobleach_fit = false; end
+    if ~isfield(params, 'baseline_window_seconds'),  params.baseline_window_seconds = 180; end
     if ~isfield(params, 'enable_remove_duplicates'), params.enable_remove_duplicates = false; end
+    if ~isfield(params, 'dedup_corr_threshold'),     params.dedup_corr_threshold = 0.7; end
     if ~isfield(params, 'enable_motion_filter'),     params.enable_motion_filter = false; end
+    if ~isfield(params, 'motion_threshold_pixels'),  params.motion_threshold_pixels = 1; end
     if ~isfield(params, 'pool_size'),                params.pool_size = 6; end
+
+    % Output suffix reflects non-default processing options
+    suffixes = {};
+    if params.enable_photobleach_fit,   suffixes{end+1} = 'expfit'; end
+    if ~params.enable_detrending,       suffixes{end+1} = 'nodetrend'; end
+    if params.enable_remove_duplicates, suffixes{end+1} = 'dedup'; end
+    if params.enable_motion_filter,     suffixes{end+1} = 'motionfiltered'; end
+    if isempty(suffixes)
+        suffix_str = '';
+    else
+        suffix_str = ['_' strjoin(suffixes, '_')];
+    end
 
     % Auto-detect frame rate and dimensions
     detected = util.auto_params.detect_all(data_dir);
@@ -65,10 +111,11 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
         ending_frame = 0;  % 0 = use all frames
     end
 
-    % Baseline window: 3 minutes worth of frames
+    % Baseline window for the exponential fit / dedup correlation epochs
     adapting_frame = 1;
-    baseline_window_frames = ceil(frame_rate * 180);
-    fprintf('Baseline window: ceil(%.2f Hz * 180 s) = %d frames\n', frame_rate, baseline_window_frames);
+    baseline_window_frames = ceil(frame_rate * params.baseline_window_seconds);
+    fprintf('Baseline window: ceil(%.2f Hz * %d s) = %d frames\n', ...
+            frame_rate, params.baseline_window_seconds, baseline_window_frames);
 
     %%% ---------------------------------------------------------------
     %%% 2. Load prerequisite data
@@ -187,92 +234,86 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     save(fullfile(data_dir, 'cell_resp_dim.mat'), 'cell_resp_dim');
 
     %%% ---------------------------------------------------------------
-    %%% 5. Baseline correction (exponential photobleaching fit)
+    %%% 5. Baseline normalization
     %%% ---------------------------------------------------------------
-    fprintf('Applying baseline correction (exponential photobleaching fit)...\n');
-
     % Background value: mean of bottom 5% of background pixels
     bg_sorted = sort(double(background_img(:)), 'ascend');
     background_baseline = mean(bg_sorted(1:round(length(bg_sorted) / 20)));
-    fprintf('  Background baseline: %.1f (bottom 5%% of background pixels)\n', background_baseline);
+    fprintf('Background baseline: %.1f (bottom 5%% of background pixels)\n', background_baseline);
 
-    n_baseline_windows = floor(n_timepoints / baseline_window_frames);
-    fprintf('  %d baseline windows of %d frames each\n', n_baseline_windows, baseline_window_frames);
+    % Background-subtracted fluorescence
+    baseline_corrected = single(raw_fluorescence - background_baseline);
 
-    bottom_fraction = round(baseline_window_frames / 5);
-    fprintf('  F0 estimated from bottom %d frames per window\n', bottom_fraction);
+    % Optional legacy path: exponential photobleaching fit
+    if params.enable_photobleach_fit
+        fprintf('Applying exponential photobleaching fit (legacy option)...\n');
 
-    % For each cell, estimate baseline in each window (bottom fraction)
-    window_baselines = zeros(n_cells, n_baseline_windows);
-    for w = 1:n_baseline_windows
-        window_data = raw_fluorescence(:, (w-1)*baseline_window_frames + (1:baseline_window_frames));
-        window_data_sorted = sort(window_data, 2);
-        window_baselines(:, w) = mean(window_data_sorted(:, 1:bottom_fraction), 2) - background_baseline;
-    end
-    window_baselines(window_baselines < 0) = 0;
+        n_baseline_windows = floor(n_timepoints / baseline_window_frames);
+        fprintf('  %d baseline windows of %d frames each\n', n_baseline_windows, baseline_window_frames);
 
-    % Exponential fit: log(baseline / mean(first windows))
-    log_baseline_ratio = log(window_baselines ./ repmat(mean(window_baselines(:, 1:2), 2), [1 n_baseline_windows]));
-    window_centers = round(baseline_window_frames / 2) + (0:baseline_window_frames:((n_baseline_windows-1)*baseline_window_frames));
+        bottom_fraction = round(baseline_window_frames / 5);
+        fprintf('  F0 estimated from bottom %d frames per window\n', bottom_fraction);
 
-    fitted_baseline = zeros(n_cells, n_timepoints);
-    fprintf('  Fitting exponential baseline for %d cells...\n', n_cells);
+        % For each cell, estimate baseline in each window (bottom fraction)
+        window_baselines = zeros(n_cells, n_baseline_windows);
+        for w = 1:n_baseline_windows
+            window_data = raw_fluorescence(:, (w-1)*baseline_window_frames + (1:baseline_window_frames));
+            window_data_sorted = sort(window_data, 2);
+            window_baselines(:, w) = mean(window_data_sorted(:, 1:bottom_fraction), 2) - background_baseline;
+        end
+        window_baselines(window_baselines < 0) = 0;
 
-    for c = 1:n_cells
-        coeffs = polyfit(window_centers, log_baseline_ratio(c, :), 1);
-        fitted_baseline(c, :) = exp(coeffs(1) * (1:n_timepoints)) * mean(window_baselines(c, 1:2));
-    end
+        % Exponential fit: log(baseline / mean(first windows))
+        log_baseline_ratio = log(window_baselines ./ repmat(mean(window_baselines(:, 1:2), 2), [1 n_baseline_windows]));
+        window_centers = round(baseline_window_frames / 2) + (0:baseline_window_frames:((n_baseline_windows-1)*baseline_window_frames));
 
-    % Apply baseline correction: dF/F = (F - F0) / F0_fit
-    baseline_corrected = (raw_fluorescence - background_baseline) ./ fitted_baseline;
+        fitted_baseline = zeros(n_cells, n_timepoints);
+        fprintf('  Fitting exponential baseline for %d cells...\n', n_cells);
 
-    % Save intermediate
-    save(fullfile(data_dir, 'baseline_fit.mat'), 'window_centers', 'window_baselines', ...
-         'fitted_baseline', 'background_baseline', '-v7.3');
-
-    %%% ---------------------------------------------------------------
-    %%% 6. Optional: Detrending (rolling percentile filter)
-    %%% ---------------------------------------------------------------
-    if params.enable_detrending
-        fprintf('\n--- Optional: Detrending (rolling percentile filter) ---\n');
-        fprintf('  Window: %d frames, step: %d frames, percentile: %d\n', 300, 100, 15);
-
-        detrended = zeros(size(baseline_corrected), 'single');
-        win_len = 300;
-        move_step = 100;
-
-        parfor c = 1:n_cells
-            cell_trace = baseline_corrected(c, :);
-            crd = zeros(size(cell_trace));
-
-            for j = 1 : move_step : n_timepoints + move_step/2
-                % Window boundaries with edge handling
-                if j <= win_len / 2
-                    w_start = 1;
-                    w_end = win_len;
-                elseif j > n_timepoints - win_len / 2
-                    w_start = n_timepoints - win_len + 1;
-                    w_end = n_timepoints;
-                else
-                    w_start = j - floor(win_len / 2);
-                    w_end = j + floor(win_len / 2);
-                end
-
-                w_start = max(1, w_start);
-                w_end = min(n_timepoints, w_end);
-
-                window_vals = real(cell_trace(w_start:w_end));
-                pct_val = prctile(window_vals, 15);
-
-                assign_start = max(1, j - floor(move_step / 2));
-                assign_end = min(n_timepoints, j + floor(move_step / 2));
-                crd(assign_start:assign_end) = pct_val;
-            end
-
-            detrended(c, :) = cell_trace - crd + 1;
+        for c = 1:n_cells
+            coeffs = polyfit(window_centers, log_baseline_ratio(c, :), 1);
+            fitted_baseline(c, :) = exp(coeffs(1) * (1:n_timepoints)) * mean(window_baselines(c, 1:2));
         end
 
+        % Apply baseline correction: dF/F = (F - F0) / F0_fit
+        baseline_corrected = single((raw_fluorescence - background_baseline) ./ fitted_baseline);
+    end
+
+    %%% ---------------------------------------------------------------
+    %%% 6. Detrending: rolling-percentile dF/F (default)
+    %%% ---------------------------------------------------------------
+    if params.enable_detrending
+        fprintf('\n--- Rolling-percentile detrending (default) ---\n');
+        fprintf('  Window: %d frames, percentile: %g, F0 offset: %g\n', ...
+                params.detrend_window_frames, params.detrend_percentile, params.detrend_offset);
+        fprintf('  output = (trace - F0) / (max(F0, 0) + offset)\n');
+
+        detrended = zeros(n_cells, n_timepoints, 'single');
+        f0_all = zeros(n_cells, n_timepoints, 'single');
+
+        parfor c = 1:n_cells
+            f0 = util.rolling_percentile_filter(baseline_corrected(c, :), ...
+                                                params.detrend_window_frames, ...
+                                                params.detrend_percentile);
+            f0_all(c, :) = f0;
+            detrended(c, :) = (baseline_corrected(c, :) - f0) ./ ...
+                              (max(f0, 0) + params.detrend_offset);
+        end
         baseline_corrected = detrended;
+
+        % Persist the inferred baseline (expensive to recompute):
+        % a single v7.3 .mat containing the F0 matrix plus provenance
+        rolling_baseline = struct( ...
+            'method',               'rolling_percentile', ...
+            'window_frames',        params.detrend_window_frames, ...
+            'percentile',           params.detrend_percentile, ...
+            'offset',               params.detrend_offset, ...
+            'background_baseline',  background_baseline, ...
+            'photobleach_fit_first', params.enable_photobleach_fit, ...
+            'created',              char(datetime('now')));
+        baseline_filename = ['cell_resp_baseline' suffix_str '.mat'];
+        save(fullfile(data_dir, baseline_filename), 'f0_all', 'rolling_baseline', '-v7.3');
+        fprintf('  Baseline saved: %s\n', baseline_filename);
         fprintf('  Detrending complete.\n');
     end
 
@@ -282,7 +323,7 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     if params.enable_remove_duplicates && dim(3) > 1
         fprintf('\n--- Optional: Removing double-counted cells ---\n');
 
-        corr_threshold = 0.7;
+        corr_threshold = params.dedup_corr_threshold;
         fprintf('  Correlation threshold: %.2f\n', corr_threshold);
 
         % De-mean for correlation
@@ -367,8 +408,8 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
             loaded_motion = load(motion_file, 'motion_param');
             motion_param = loaded_motion.motion_param;
 
-            move_threshold = 1;
-            fprintf('  Motion threshold: %d pixel\n', move_threshold);
+            move_threshold = params.motion_threshold_pixels;
+            fprintf('  Motion threshold: %g pixel\n', move_threshold);
 
             % For each cell, find nearest grid points and average their motion
             for c = 1:n_cells
@@ -412,18 +453,6 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     cell_resp = baseline_corrected;
     cell_resp_dim = size(cell_resp);
 
-    % Build output suffix based on enabled options
-    suffixes = {};
-    if params.enable_detrending, suffixes{end+1} = 'detrended'; end
-    if params.enable_remove_duplicates, suffixes{end+1} = 'dedup'; end
-    if params.enable_motion_filter, suffixes{end+1} = 'motionfiltered'; end
-
-    if isempty(suffixes)
-        suffix_str = '';
-    else
-        suffix_str = ['_' strjoin(suffixes, '_')];
-    end
-
     resp_filename = ['cell_resp_processed' suffix_str '.stackf'];
     dim_filename = ['cell_resp_dim_processed' suffix_str '.mat'];
     info_filename = ['cell_info_processed' suffix_str '.mat'];
@@ -440,10 +469,23 @@ function [cell_resp, cell_info] = get_cell_tcourse(data_dir, params)
     fprintf('Outputs:\n');
     fprintf('  %s\n', fullfile(data_dir, resp_filename));
     fprintf('  %s\n', fullfile(data_dir, info_filename));
-    if params.enable_detrending,  fprintf('  [x] Detrending applied\n'); end
+    if params.enable_detrending
+        fprintf('  [x] Rolling-percentile detrending (window=%d, pct=%g, offset=%g)\n', ...
+                params.detrend_window_frames, params.detrend_percentile, params.detrend_offset);
+        fprintf('      baseline: %s\n', fullfile(data_dir, ['cell_resp_baseline' suffix_str '.mat']));
+    else
+        if params.enable_photobleach_fit
+            fprintf('  [ ] Detrending disabled (output is exp-fit dF/F)\n');
+        else
+            fprintf('  [ ] Detrending disabled (output is background-subtracted raw)\n');
+        end
+    end
+    if params.enable_photobleach_fit, ...
+            fprintf('  [x] Exponential photobleaching fit applied\n'); end
     if params.enable_remove_duplicates && dim(3) > 1, ...
-            fprintf('  [x] Double-counted cells removed\n'); end
-    if params.enable_motion_filter, fprintf('  [x] Motion-filtered\n'); end
+            fprintf('  [x] Double-counted cells removed (corr > %.2f)\n', params.dedup_corr_threshold); end
+    if params.enable_motion_filter, ...
+            fprintf('  [x] Motion-filtered (threshold %g px)\n', params.motion_threshold_pixels); end
     fprintf('Elapsed time: %.1f seconds\n', elapsed);
     fprintf('========================================================\n\n');
 end

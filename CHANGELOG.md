@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Time course extraction default baseline normalization** (`+pipeline/get_cell_tcourse.m`): rolling-percentile dF/F (`(F - bg - F0) / (max(F0,0) + offset)`, cf. "Baseline normalization" in Mu et al., 2019, Cell 178, 27–43) is now the default and background subtraction is always applied; the exponential photobleaching fit moved to an optional legacy path (`enable_photobleach_fit`, default off, applied before detrending when enabled)
+- `+util/rolling_percentile_filter.m` replaced with the per-sample sliding-window algorithm from `common_20210823/new pipeline` (running sorted window + `binary_search`; new dependency `+util/binary_search.m`), replacing the previous block-based implementation. Two bugs in the original were fixed during the port: insertion of a new running minimum corrupted the sorted window (affects drifting/bleaching traces), and column-vector inputs crashed; verified against a brute-force sliding-window reference
+- Output filenames carry a suffix only for non-default options (`_expfit`, `_nodetrend`, `_dedup`, `_motionfiltered`); the default output name `cell_resp_processed.stackf` is unchanged so batch resume keeps working
+
+### Added
+
+- Inferred baseline persistence: stage 3 writes a single `cell_resp_baseline.mat` (v7.3) containing the F0 matrix (`f0_all`) and a provenance struct `rolling_baseline` (window, percentile, offset, background level)
+- Stage 3 parameters exposed in the GUI (main Step 3 panel and batch options dialog): detrending window (frames), percentile, F0 offset, exponential-fit toggle + baseline window (s), dedup correlation threshold, motion threshold (px); parameter fields grey out when their option is disabled
+- Pipeline params: `detrend_window_frames` (600), `detrend_percentile` (15), `detrend_offset` (10), `enable_photobleach_fit` (false), `baseline_window_seconds` (180), `dedup_corr_threshold` (0.7), `motion_threshold_pixels` (1)
+
+### Removed
+
+- `baseline_fit.mat` is no longer written (exponential-fit internals were diagnostics-only); the exponential fit itself remains available via `enable_photobleach_fit`
+
 ### Added
 
 - Single-plane (2D) dataset support with automatic detection (`util.auto_params.detect_mode`): data with only `Plane01.stack` and a single-page `ave.tif` runs with `slice = 1` for all detected cells, XY-only motion estimation (Z skipped, Z stats = 0), and duplicate-cell removal skipped automatically

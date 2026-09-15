@@ -20,7 +20,10 @@ function results = batch_process(list_file, br_threshold, params)
 %   .skip_motion       — skip Phase 2 entirely
 %   .force_rerun       — re-run even if output files exist
 %   .use_gpu           — use GPU variant of check_motion
-%   .enable_detrending, .enable_remove_duplicates, .enable_motion_filter
+%   .enable_detrending, .detrend_window_frames, .detrend_percentile,
+%   .detrend_offset, .enable_photobleach_fit, .baseline_window_seconds,
+%   .enable_remove_duplicates, .dedup_corr_threshold,
+%   .enable_motion_filter, .motion_threshold_pixels
 %     — passed through to get_cell_tcourse
 %
 % Returns a table summarizing results for each directory.

@@ -11,12 +11,22 @@ function run_pipeline(data_dir, br_threshold, params)
 %
 % If br_threshold is omitted or empty, you will be prompted for it.
 %
-% Optional params struct fields:
-%   .test_minutes       - Limit to first N minutes (for dev/testing)
-%   .use_gpu            - Use GPU for motion correction (default: false)
-%   .enable_detrending  - Rolling percentile detrending (default: false)
+% Optional params struct fields (time course extraction unless noted):
+%   .test_minutes            - Limit to first N minutes (for dev/testing)
+%   .use_gpu                 - Use GPU for motion correction (default: false)
+%   .enable_detrending       - Rolling percentile dF/F normalization
+%                              (default: true)
+%   .detrend_window_frames   - Rolling window length in frames (default: 600)
+%   .detrend_percentile      - Baseline percentile, 0-100 (default: 15)
+%   .detrend_offset          - Offset added to F0 in the dF/F denominator
+%                              (default: 10)
+%   .enable_photobleach_fit  - Legacy exponential photobleaching fit,
+%                              applied before detrending (default: false)
+%   .baseline_window_seconds - Exp-fit baseline window in seconds (default: 180)
 %   .enable_remove_duplicates - Remove double-counted cells (default: false)
+%   .dedup_corr_threshold    - Correlation threshold for dedup (default: 0.7)
 %   .enable_motion_filter    - Motion-based cell filtering (default: false)
+%   .motion_threshold_pixels - Motion threshold in pixels (default: 1)
 %
 % Example:
 %   run_pipeline('Z:\GJT\Matlab\SPIM_pipeline_refactor\sample_data\...', 120)

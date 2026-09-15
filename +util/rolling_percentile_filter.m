@@ -1,91 +1,95 @@
-function baseline = rolling_percentile_filter(signal, window_length, step_size, percentile)
-% ROLLING_PERCENTILE_FILTER  Sliding-window percentile baseline estimation.
+function baseline = rolling_percentile_filter(signal, window, percentile)
+% ROLLING_PERCENTILE_FILTER  Per-sample sliding-window percentile baseline.
 %
-%   baseline = util.rolling_percentile_filter(signal, window_length, ...
-%                                              step_size, percentile)
+%   baseline = util.rolling_percentile_filter(signal)
+%   baseline = util.rolling_percentile_filter(signal, window, percentile)
 %
-% Computes a smooth baseline of a 1D signal by sliding a window across it,
-% computing the specified percentile within each window, and assigning
-% that value to the window's center region. This is used to estimate
-% slow fluorescence fluctuations (e.g., photobleaching) in calcium
-% imaging time courses.
+% Estimates the slow lower envelope of a 1D signal by sliding a window
+% across it one sample at a time and computing the given percentile of
+% each window. Used to estimate the baseline fluorescence F0 in the
+% rolling-percentile dF/F normalization of pipeline.get_cell_tcourse
+% (cf. "Baseline normalization" in Mu et al., 2019, Cell 178, 27-43).
 %
 % Inputs:
-%   signal       - 1D signal vector (row or column)
-%   window_length - Number of samples in each sliding window (default: 300)
-%   step_size    - Step size between window centers (default: 100)
-%   percentile   - Percentile to compute in each window, 0-100 (default: 15)
+%   signal     - 1D signal vector (row or column)
+%   window     - Number of samples in the sliding window (default: 600);
+%                clamped to the signal length if it exceeds it
+%   percentile - Percentile to compute in each window, 0-100 (default: 15)
 %
 % Output:
-%   baseline     - Same length as signal; smooth lower envelope
+%   baseline - Same size as signal; per-sample percentile estimate. The
+%              first ceil(window/2) and last floor(window/2) samples take
+%              the value of the first / last full window.
 %
-% Algorithm (from get_cell_tcourse_new_zs_jtg.m):
-%   Windows of `window_length` samples are placed along the signal spaced
-%   by `step_size`. For each window, the `percentile`-th percentile is
-%   computed and assigned to the center region (step_size/2 on each side
-%   of the window center). Edge windows use truncated ranges.
+% Algorithm (ported from common_20210823/new pipeline):
+%   A running sorted copy of the current window is maintained. At each
+%   step the outgoing sample is located with a binary search and removed,
+%   and the incoming sample is inserted at its sorted position, so each
+%   window's percentile is obtained without re-sorting. Complexity is
+%   O(n_samples * window) per signal.
+%
+%   Deviations from the original (bug fixes):
+%     - The original inserts a new running minimum AFTER the previous
+%       minimum (util.binary_search cannot return a position before the
+%       first element), silently breaking the sorted order on drifting
+%       signals such as photobleaching decay. New minima are now
+%       prepended.
+%     - Column vectors are accepted and preserved.
+%     - The window is clamped to the signal length (short test runs).
 %
 % Example:
 %   t = 1:1000;
 %   signal = sin(t/50) + 0.5 * randn(1, 1000) + t * 0.01;
-%   bl = util.rolling_percentile_filter(signal, 200, 50, 10);
+%   bl = util.rolling_percentile_filter(signal, 200, 15);
 %   plot(t, signal, t, bl);
+%
+% See also util.binary_search, pipeline.get_cell_tcourse
 
-    if nargin < 2 || isempty(window_length), window_length = 300; end
-    if nargin < 3 || isempty(step_size),     step_size = 100; end
-    if nargin < 4 || isempty(percentile),    percentile = 15; end
+    if nargin < 2 || isempty(window),     window = 600; end
+    if nargin < 3 || isempty(percentile), percentile = 15; end
 
-    % Ensure row vector
-    was_column = iscolumn(signal);
-    if was_column
-        signal = signal';
+    if ~isvector(signal)
+        error('rolling_percentile_filter:notVector', 'Input must be a 1D vector.');
     end
+
+    was_column = iscolumn(signal);
+    signal = signal(:)';   % work in row orientation
 
     n_samples = length(signal);
+    window = min(window, n_samples);
+    if window < 1
+        error('rolling_percentile_filter:badWindow', 'Window must be at least 1 sample.');
+    end
+    prc_index = min(window, max(1, round(window * percentile / 100)));
+
+    % Degenerate case: single-sample windows
+    if window == 1
+        baseline = signal;
+        if was_column, baseline = baseline'; end
+        return;
+    end
+
     baseline = zeros(size(signal));
 
-    % Slide window across the signal
-    for j = 1 : step_size : n_samples + step_size/2
-        % Determine window boundaries (handle edges)
-        if j <= window_length / 2
-            win_start = 1;
-            win_end = window_length;
-        elseif j > n_samples - window_length / 2
-            win_start = n_samples - window_length + 1;
-            win_end = n_samples;
+    sorted = sort(signal(1:window));
+    baseline(1:ceil(window/2)) = sorted(prc_index);
+
+    for j = ceil(window/2) + 1 : n_samples - floor(window/2)
+        last_point = signal(j - ceil(window/2));
+        last_point_index = util.binary_search(sorted, last_point);
+        sorted = [sorted(1:last_point_index-1) sorted(last_point_index+1:end)];
+        new_point = signal(j + floor(window/2));
+        new_point_index = util.binary_search(sorted, new_point);
+        if new_point_index == 1 && sorted(1) > new_point
+            % New running minimum: insert before the first element
+            sorted = [new_point sorted];
         else
-            win_start = j - floor(window_length / 2);
-            win_end = j + floor(window_length / 2);
+            sorted = [sorted(1:new_point_index) new_point sorted(new_point_index+1:end)];
         end
-
-        % Clamp to valid range
-        win_start = max(1, win_start);
-        win_end = min(n_samples, win_end);
-
-        % Compute percentile within window
-        window_data = real(signal(win_start:win_end));
-        pct_value = prctile(window_data, percentile);
-
-        % Assign to center region of the window
-        assign_start = max(1, j - floor(step_size / 2));
-        assign_end = min(n_samples, j + floor(step_size / 2));
-        baseline(assign_start:assign_end) = pct_value;
+        baseline(j) = sorted(prc_index);
     end
 
-    % Linear interpolation to smooth transitions between windows
-    % (preserves the original piecewise-constant behavior at window centers,
-    %  but removes sharp jumps at window boundaries)
-    nonzero_mask = baseline ~= 0;
-    if any(nonzero_mask)
-        nonzero_idx = find(nonzero_mask);
-        zero_idx = find(~nonzero_mask);
-
-        if ~isempty(zero_idx)
-            % Interpolate any gaps
-            baseline(zero_idx) = interp1(nonzero_idx, baseline(nonzero_idx), ...
-                                         zero_idx, 'linear', 'extrap');
-        end
-    end
+    baseline(n_samples - floor(window/2) + 1 : end) = sorted(prc_index);
 
     if was_column
         baseline = baseline';

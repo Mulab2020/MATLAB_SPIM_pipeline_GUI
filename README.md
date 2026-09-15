@@ -8,7 +8,27 @@ A MATLAB application for processing light-sheet microscopy (SPIM) calcium imagin
 
 2. **Motion Correction** (`check_motion` / `check_motion_gpu`) — Estimates and corrects tissue motion over time using FFT-based 2D cross-correlation on a grid of points across each z-plane. A reference is built from the first time block; each subsequent block is registered against it. A GPU-accelerated variant exists but has a known defect (see [Known Issues](#known-issues)).
 
-3. **Time Course Extraction** (`get_cell_tcourse`) — Reads per-plane time-series stacks (`PlaneXX.stack`), extracts mean fluorescence within each cell's ROI over time, applies exponential photobleaching baseline correction, and optionally performs rolling-percentile detrending, duplicate removal, and motion-based cell filtering.
+3. **Time Course Extraction** (`get_cell_tcourse`) — Reads per-plane time-series stacks (`PlaneXX.stack`), extracts mean fluorescence within each cell's ROI over time, subtracts the background level (bottom 5% of `Background_1.tif`), and normalizes each trace with a rolling-percentile baseline (cf. "Baseline normalization" in Mu et al., 2019, Cell 178, 27–43):
+
+   ```
+   F0   = rolling percentile of (F - bg)    (per-sample sliding window)
+   dF/F = (F - bg - F0) / (max(F0, 0) + offset)
+   ```
+
+   The legacy exponential photobleaching fit is available as an option (applied before detrending when enabled). Optional post-processing: duplicate-cell removal and motion-based cell filtering. The inferred baseline F0 is saved (`cell_resp_baseline.mat`) so it does not need to be recomputed downstream.
+
+   | Parameter | Default | Description |
+   |-----------|---------|-------------|
+   | `enable_detrending` | `true` | Rolling-percentile dF/F normalization |
+   | `detrend_window_frames` | `600` | Sliding-window length (frames) |
+   | `detrend_percentile` | `15` | Baseline percentile (0–100) |
+   | `detrend_offset` | `10` | Offset added to F0 in the denominator |
+   | `enable_photobleach_fit` | `false` | Legacy exponential photobleaching fit |
+   | `baseline_window_seconds` | `180` | Exp-fit baseline window (s) |
+   | `dedup_corr_threshold` | `0.7` | Duplicate-removal correlation threshold |
+   | `motion_threshold_pixels` | `1` | Motion-filtering threshold (pixels) |
+
+   All parameters are exposed in the GUI (Step 3 panel and the batch options dialog).
 
 ## Single-Plane Mode
 
@@ -56,7 +76,7 @@ Workflow:
 2. Adjust the **brightness threshold** slider to tune cell segmentation sensitivity.
 3. Click **Stage 1: Segment** to run cell detection. Review the overlaid cell mask in the preview panel and adjust the threshold as needed.
 4. Click **Stage 2: Motion** to run motion correction (CPU or GPU, depending on the checkbox).
-5. Click **Stage 3: Extract** to run time course extraction with optional detrending / duplicate removal / motion filtering.
+5. Click **Stage 3: Extract** to run time course extraction with rolling-percentile detrending (default) and optional exponential photobleaching fit / duplicate removal / motion filtering. Detrending parameters (window, percentile, F0 offset) and filter thresholds are editable in the Step 3 panel.
 
 ### Command Line
 
@@ -72,7 +92,11 @@ Optional third argument — a `params` struct:
 >> params = struct(...
     'test_minutes', 5, ...           % limit to first N minutes (dev/testing)
     'use_gpu', false, ...            % use GPU for motion correction
-    'enable_detrending', false, ...  % rolling-percentile baseline detrending
+    'enable_detrending', true, ...   % rolling-percentile dF/F normalization (default)
+    'detrend_window_frames', 600, ...% sliding-window length in frames
+    'detrend_percentile', 15, ...    % baseline percentile (0-100)
+    'detrend_offset', 10, ...        % offset added to F0 in the denominator
+    'enable_photobleach_fit', false, ... % legacy exponential fit (before detrending)
     'enable_remove_duplicates', false, ... % remove double-counted cells
     'enable_motion_filter', false);  % motion-based cell filtering
 >> run_pipeline('Z:\path\to\data_dir', 120, params)
@@ -113,7 +137,8 @@ Written to the same data directory:
 | `motion_param.mat` | 2 | Motion estimates per z-plane (tilt, displacements) |
 | `motion.tif` | 2 | Per-plane motion visualization |
 | `motion_graph.tif` | 2 | Summary motion plot |
-| `cell_resp_processed.stackf` | 3 | Baseline-corrected fluorescence time courses (float32 binary) |
+| `cell_resp_processed.stackf` | 3 | Normalized (rolling-percentile dF/F) fluorescence time courses (float32 binary) |
+| `cell_resp_baseline.mat` | 3 | Inferred rolling-percentile baseline F0 per cell (`f0_all`, float32) plus provenance struct (`rolling_baseline`: window, percentile, offset, background level); written when detrending is on |
 | `cell_info_processed.mat` | 3 | Filtered cell info |
 | `cell_resp_dim_processed.mat` | 3 | Dimensions of the processed response array |
 
@@ -141,7 +166,8 @@ Written to the same data directory:
 ├── +util/                        # Utility functions
 │   ├── auto_params.m             #   Auto-detection of acquisition metadata
 │   ├── imNormalize99.m           #   99th-percentile image normalization
-│   ├── rolling_percentile_filter.m
+│   ├── rolling_percentile_filter.m #   Per-sample sliding-window percentile baseline
+│   ├── binary_search.m             #   Sorted-vector insertion point (filter helper)
 │   ├── get_optimal_workers.m     #   Optimal parfor worker count
 │   └── ...
 ├── archive/                      # Benchmarks and historical reports
