@@ -21,6 +21,13 @@ classdef auto_params
         %   .frame_rate, .n_total_frames, .stack_height, .stack_width,
         %   .n_zplanes, .frame_start, .frame_end, .is_single_plane
         %
+        % .frame_rate is the per-frame sampling rate of the PlaneXX.stack
+        % time series: for volumetric data it equals the stack (volume)
+        % frequency in Stack_frequency.txt; for single-plane data it is the
+        % stack frequency multiplied by the number of frames per stack
+        % (metadata Z), since all frames of a stack cycle are written to
+        % Plane01.stack.
+        %
         % When single-plane data is detected, .n_zplanes is forced to 1
         % regardless of what the metadata files say.
             fprintf('\n========== Auto-detecting parameters from: %s ==========\n', data_dir);
@@ -37,9 +44,19 @@ classdef auto_params
                 util.auto_params.read_frame_range(data_dir);
 
             summary.is_single_plane = util.auto_params.detect_mode(data_dir);
-            if summary.is_single_plane && summary.n_zplanes ~= 1
-                fprintf('  [auto_params] Overriding metadata n_zplanes=%d with 1 (single-plane data)\n', ...
-                        summary.n_zplanes);
+            if summary.is_single_plane
+                frames_per_stack = summary.n_zplanes;
+                if frames_per_stack > 1
+                    stack_freq = summary.frame_rate;
+                    summary.frame_rate = stack_freq * frames_per_stack;
+                    fprintf(['  [auto_params] Single-plane: frame rate = stack freq %.2f Hz ' ...
+                             'x %d frames/stack = %.2f Hz\n'], ...
+                            stack_freq, frames_per_stack, summary.frame_rate);
+                end
+                if frames_per_stack ~= 1
+                    fprintf('  [auto_params] Overriding metadata n_zplanes=%d with 1 (single-plane data)\n', ...
+                            frames_per_stack);
+                end
                 summary.n_zplanes = 1;
             end
 
@@ -62,7 +79,10 @@ classdef auto_params
         % READ_FRAME_RATE  Parse Stack_frequency.txt.
         %
         % File format (3 lines):
-        %   Line 1: volume frame rate in Hz
+        %   Line 1: stack (volume) frequency in Hz; rate of complete stack
+        %           cycles. Equals the per-plane frame rate only for
+        %           volumetric data (see detect_all for the single-plane
+        %           correction).
         %   Line 2: total scan duration in seconds
         %   Line 3: total number of acquired volumes
             freq_file = fullfile(data_dir, 'Stack_frequency.txt');
@@ -85,7 +105,7 @@ classdef auto_params
             frame_rate = data(1);
             n_total_frames = data(3);
 
-            fprintf('  [auto_params] Stack_frequency.txt -> frame_rate = %.2f Hz, total_frames = %d\n', ...
+            fprintf('  [auto_params] Stack_frequency.txt -> stack_freq = %.2f Hz, total_frames = %d\n', ...
                     frame_rate, n_total_frames);
         end
 

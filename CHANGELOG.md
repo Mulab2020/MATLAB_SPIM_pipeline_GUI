@@ -29,6 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Single-plane frame rate: line 1 of `Stack_frequency.txt` is the stack (volume) frequency, not the per-frame rate — for single-plane data `util.auto_params.detect_all` now returns stack frequency × frames per stack (metadata Z from `Stack dimensions.log`), fixing seconds→frames conversions (`zcycle` in motion correction, exp-fit/dedup baseline window in time course extraction) for single-plane datasets
+- GUI: the exponential-fit window parameter now sits next to its option in both the Step 3 panel and the batch options dialog (it was previously grouped with the detrending parameters)
+- GUI: parameter labels carry units in both the main window and the batch options dialog (threshold a.u., detrend window frames, percentile %, F0 offset a.u., exp window s)
 - GUI: the batch options dialog no longer overwrites the main window's Step 3 checkbox handles (nested-function variable shadowing), which previously caused "Invalid or deleted object" errors after running batch mode
 
 ## [1.4] — 2026-06-30

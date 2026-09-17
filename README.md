@@ -44,7 +44,8 @@ When single-plane data is detected:
 | Cell segmentation | Runs on the single plane; all cells get `slice = 1` |
 | Motion correction | XY only — Z estimation and its plots are skipped (Z stats = 0) |
 | Duplicate-cell removal | Skipped automatically (no adjacent z-planes); the GUI disables the option |
-| Metadata plane count | Overridden to 1, even if `Stack dimensions.log` claims otherwise |
+| Frame rate | Line 1 of `Stack_frequency.txt` is the stack (volume) frequency; the effective per-frame rate is stack frequency × frames per stack (the Z value from `Stack dimensions.log`) |
+| Metadata plane count | Overridden to 1, even if `Stack dimensions.log` claims otherwise (its Z value is used as frames-per-stack for the frame-rate correction) |
 
 If the two detection criteria conflict (e.g. only `Plane01.stack` but a multi-page `ave.tif`), a warning is issued and the data is treated as volumetric.
 
