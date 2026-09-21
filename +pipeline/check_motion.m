@@ -59,17 +59,23 @@ function motion_param = check_motion(data_dir, params)
 
     % Hardcoded physical constants (from acquisition setup)
     xy_pixel_um = 0.406;      % XY pixel size in microns
-    z_pixel_um = 5;           % Z step in microns
+    z_pixel_um = 8;           % Z step in microns, this is the usual setting. TODO: read from <info z_step> in ch0_cam[num].xml in auto_params
 
     % Grid-point search radius (pixels)
     grid_radius = 30;
 
     % zcycle: number of consecutive frames to average into one timepoint
     % Formula: ~60 seconds worth of frames per timepoint
+    fprintf("zcycle: number of consecutive frames to average into one timepoint - ");
     zcycle_seconds = 60;
-    zcycle = round(frame_rate * zcycle_seconds);
-    fprintf('Formula: zcycle = round(frame_rate * %.0f) = round(%.2f * %.0f) = %d frames/timepoint\n', ...
-            zcycle_seconds, frame_rate, zcycle_seconds, zcycle);
+    if is_single_plane
+        zcycle = 150;
+        fprintf('Single-plane data: use fixed zcycle = %d \n', zcycle);
+    else
+        zcycle = round(frame_rate * zcycle_seconds);
+        fprintf('Formula: zcycle = round(frame_rate * %.0f) = round(%.2f * %.0f) = %d frames/timepoint\n', ...
+                zcycle_seconds, frame_rate, zcycle_seconds, zcycle);
+    end
 
     % Brightness threshold for grid-point selection
     if isfield(params, 'brightness_threshold')
