@@ -9,6 +9,7 @@ classdef auto_params
 %   read_frame_rate   - Parse Stack_frequency.txt
 %   read_dimensions   - Parse Stack dimensions.log or ch0_cam1.xml
 %   read_frame_range  - Parse minANDmax.txt
+%   read_z_step       - Parse <info z_step> from ch0_cam*.xml
 
     methods (Static)
 
@@ -19,7 +20,8 @@ classdef auto_params
         %
         % Returns a struct with fields:
         %   .frame_rate, .n_total_frames, .stack_height, .stack_width,
-        %   .n_zplanes, .frame_start, .frame_end, .is_single_plane
+        %   .n_zplanes, .frame_start, .frame_end, .is_single_plane,
+        %   .z_step_um
         %
         % .frame_rate is the per-frame sampling rate of the PlaneXX.stack
         % time series: for volumetric data it equals the stack (volume)
@@ -39,6 +41,8 @@ classdef auto_params
 
             [summary.stack_height, summary.stack_width, summary.n_zplanes] = ...
                 util.auto_params.read_dimensions(data_dir);
+
+            summary.z_step_um = util.auto_params.read_z_step(data_dir);
 
             [summary.frame_start, summary.frame_end] = ...
                 util.auto_params.read_frame_range(data_dir);
@@ -64,6 +68,7 @@ classdef auto_params
             fprintf('  Frame rate:       %.2f Hz\n', summary.frame_rate);
             fprintf('  Stack dimensions: %d x %d x %d (H x W x Z)\n', ...
                     summary.stack_height, summary.stack_width, summary.n_zplanes);
+            fprintf('  Z step:          %.3f um\n', summary.z_step_um);
             fprintf('  Total frames:     %d (range %d-%d)\n', ...
                     summary.n_total_frames, summary.frame_start, summary.frame_end);
             if summary.is_single_plane
@@ -136,6 +141,48 @@ classdef auto_params
                 fprintf('  [auto_params] Stack dimensions.log not found, trying ch0_cam1.xml...\n');
                 [height, width, n_planes] = util.auto_params.parse_xml_dimensions(data_dir);
             end
+        end
+
+
+        function z_step_um = read_z_step(data_dir)
+        % READ_Z_STEP  Parse <info z_step> from ch0_cam*.xml.
+        %
+        %   z_step_um = util.auto_params.read_z_step(data_dir)
+        %
+        % Prefers ch0_cam1.xml; otherwise the first ch0_cam*.xml found in
+        % data_dir is used. Errors if no XML is present or z_step cannot
+        % be parsed.
+            xml_file = fullfile(data_dir, 'ch0_cam1.xml');
+            if ~exist(xml_file, 'file')
+                xml_matches = dir(fullfile(data_dir, 'ch0_cam*.xml'));
+                if ~isempty(xml_matches)
+                    xml_file = fullfile(data_dir, xml_matches(1).name);
+                end
+            end
+
+            if ~exist(xml_file, 'file')
+                error('auto_params:missingFile', ...
+                      'No ch0_cam*.xml found in: %s', data_dir);
+            end
+
+            txt = fileread(xml_file);
+            % Anchor on '<info z_step=' so high_res_z_step is not matched
+            match = regexp(txt, '<info\s+z_step="([0-9.eE+-]+)"', 'tokens', 'once');
+
+            if isempty(match)
+                error('auto_params:badFormat', ...
+                      'Could not parse <info z_step> from %s', xml_file);
+            end
+
+            z_step_um = str2double(match{1});
+
+            if ~(z_step_um > 0)
+                error('auto_params:badFormat', ...
+                      'Invalid z_step "%s" in %s', match{1}, xml_file);
+            end
+
+            fprintf('  [auto_params] %s <info z_step> -> %.3f um\n', ...
+                    xml_file, z_step_um);
         end
 
 

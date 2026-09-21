@@ -182,14 +182,14 @@ Written to the same data directory:
 
 ### Physical Constants
 
-The pipeline uses hardcoded microscope parameters:
+The pipeline uses the following microscope parameters:
 
 | Parameter | Value | Used in |
 |-----------|-------|---------|
-| XY pixel size | 0.406 µm | Cell segmentation, motion correction |
-| Z step | 5 µm | Cell segmentation |
+| XY pixel size | 0.406 µm (hardcoded, measured empirically) | Cell segmentation, motion correction |
+| Z step | Read from `<info z_step>` in `ch0_cam*.xml` (`util.auto_params.read_z_step`) | Motion correction |
 
-These are defined inside `recog_wholefish.m` and `check_motion.m` — adjust them there if your setup differs.
+The Z step is auto-detected per dataset; `util.auto_params.detect_all` errors out if no `ch0_cam*.xml` is present or `z_step` cannot be parsed. The XY pixel size is defined inside `recog_wholefish.m` and `check_motion.m` — adjust it there if your setup differs.
 
 ### Parallel Workers
 

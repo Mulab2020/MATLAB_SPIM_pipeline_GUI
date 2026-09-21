@@ -57,9 +57,9 @@ function motion_param = check_motion(data_dir, params)
         fprintf('Single-plane data: estimating XY motion only (Z motion skipped)\n');
     end
 
-    % Hardcoded physical constants (from acquisition setup)
-    xy_pixel_um = 0.406;      % XY pixel size in microns
-    z_pixel_um = 8;           % Z step in microns, this is the usual setting. TODO: read from <info z_step> in ch0_cam[num].xml in auto_params
+    % Physical constants (from acquisition setup)
+    xy_pixel_um = 0.406;      % XY pixel size in microns (measured empirically)
+    z_pixel_um = detected.z_step_um;   % Z step in um, from <info z_step> in ch0_cam*.xml
 
     % Grid-point search radius (pixels)
     grid_radius = 30;

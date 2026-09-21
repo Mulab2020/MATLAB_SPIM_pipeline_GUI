@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Z step is now read from `<info z_step>` in `ch0_cam*.xml` (`util.auto_params.read_z_step`, exposed as `summary.z_step_um` in `util.auto_params.detect_all`) instead of being hardcoded — 8 µm in `check_motion.m` and 5 µm in `check_motion_gpu.m` (the GPU default was wrong for the usual setup); `detect_all` errors (`auto_params:missingFile` / `auto_params:badFormat`) if no `ch0_cam*.xml` is present or `z_step` cannot be parsed. XY pixel size (0.406 µm) remains hardcoded (measured empirically)
+
 - **Time course extraction default baseline normalization** (`+pipeline/get_cell_tcourse.m`): rolling-percentile dF/F (`(F - bg - F0) / (max(F0,0) + offset)`, cf. "Baseline normalization" in Mu et al., 2019, Cell 178, 27–43) is now the default and background subtraction is always applied; the exponential photobleaching fit moved to an optional legacy path (`enable_photobleach_fit`, default off, applied before detrending when enabled)
 - `+util/rolling_percentile_filter.m` replaced with the per-sample sliding-window algorithm from `common_20210823/new pipeline` (running sorted window + `binary_search`; new dependency `+util/binary_search.m`), replacing the previous block-based implementation. Two bugs in the original were fixed during the port: insertion of a new running minimum corrupted the sorted window (affects drifting/bleaching traces), and column-vector inputs crashed; verified against a brute-force sliding-window reference
 - Output filenames carry a suffix only for non-default options (`_expfit`, `_nodetrend`, `_dedup`, `_motionfiltered`); the default output name `cell_resp_processed.stackf` is unchanged so batch resume keeps working

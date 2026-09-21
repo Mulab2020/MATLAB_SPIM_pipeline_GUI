@@ -74,8 +74,8 @@ function motion_param = check_motion_gpu(data_dir, params)
         fprintf('Single-plane data: estimating XY motion only (Z motion skipped)\n');
     end
 
-    xy_pixel_um = 0.406;
-    z_pixel_um = 5;
+    xy_pixel_um = 0.406;      % XY pixel size in microns (measured empirically)
+    z_pixel_um = detected.z_step_um;   % Z step in um, from <info z_step> in ch0_cam*.xml
     grid_radius = 30;
     zcycle_seconds = 60;
     zcycle = round(frame_rate * zcycle_seconds);
